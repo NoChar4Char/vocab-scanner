@@ -630,7 +630,7 @@ function buildPDFDoc(entries, title) {
     const defLines = doc.splitTextToSize(entry.definition, CW);
     checkY(defLines.length * 14 + 6);
     doc.text(defLines, ML, y);
-    y += defLines.length * 14 + 14; // gap before context boxes
+    y += defLines.length * 14 + 8; // gap before context boxes
 
     // Context sentences
     const occs = entry.occurrences
@@ -662,7 +662,7 @@ function buildPDFDoc(entries, title) {
       y += 6; // gap between context boxes
     }
 
-    y += 28; // whitespace between entries
+    y += 16; // whitespace between entries
   }
 
   return doc;
