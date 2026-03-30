@@ -638,17 +638,19 @@ function buildPDFDoc(entries, title) {
 
     for (const occ of occs.slice(0, 5)) {
       const txt = '\u201c' + occ.sentence.replace(/"/g, ' ') + '\u201d';
-      // CW - 28 = 14px left padding + 14px right breathing room; prevents overflow
-      const ctxLines = doc.splitTextToSize(txt, CW - 28);
-      const bH = ctxLines.length * 14 + 10; // 14pt line height, 5pt top + 5pt bottom padding
-      checkY(bH + 18);
+      // Set font FIRST so splitTextToSize uses correct 9pt character widths
+      doc.setFontSize(9).setFont(undefined, 'italic'); rgb(55, 62, 108);
+      // Left 16pt + right 20pt padding inside box
+      const ctxLines = doc.splitTextToSize(txt, CW - 36);
+      // jsPDF renders 9pt text at 9 × 1.15 ≈ 10.4pt per line; 5pt top + 5pt bottom pad
+      const bH = Math.ceil(ctxLines.length * 10.4 + 14); // +4 to give equal top & bottom visual gap
+      checkY(bH + 16);
 
       fill(246, 247, 254); draw(208, 211, 240); doc.setLineWidth(0.3);
       doc.roundedRect(ML, y, CW, bH, 2, 2, 'FD');
       fill(91, 95, 220); doc.rect(ML, y, 3, bH, 'F');
 
-      doc.setFontSize(9).setFont(undefined, 'italic'); rgb(55, 62, 108);
-      doc.text(ctxLines, ML + 12, y + 8);
+      doc.text(ctxLines, ML + 16, y + 11); // y+11 matches the bottom breathing room visually
       y += bH + 5;
 
       if (occ.source) {
