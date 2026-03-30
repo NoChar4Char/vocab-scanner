@@ -15,17 +15,18 @@ let currentSource = '';
 // ── DOM refs ───────────────────────────────────────────────────────────────
 const scanBtn     = document.getElementById('scanBtn');
 const scanText    = document.getElementById('scanText');
-const scanIcon    = document.getElementById('scanIcon');
 const statusMsg   = document.getElementById('statusMsg');
 const wordListEl  = document.getElementById('wordList');
 const emptyState  = document.getElementById('emptyState');
 const statsBar    = document.getElementById('statsBar');
 const sourceBar   = document.getElementById('sourceBar');
 const sourceLabel = document.getElementById('sourceLabel');
+const sourceType  = document.getElementById('sourceType');
 const footer      = document.getElementById('footer');
 const saveBtn     = document.getElementById('saveBtn');
 const scanPdfBtn  = document.getElementById('scanPdfBtn');
 const masterBtn   = document.getElementById('masterBtn');
+const clearBtn    = document.getElementById('clearBtn');
 const wordCountEl = document.getElementById('wordCount');
 const savedCountEl= document.getElementById('savedCount');
 const selectAll   = document.getElementById('selectAll');
@@ -394,6 +395,20 @@ async function scanPage() {
     renderWordList(currentResults);
     updateStats();
     setStatus('');
+
+    // Persist results so popup can reopen without re-scanning the same tab
+    try {
+      const [tab2] = await chrome.tabs.query({ active: true, currentWindow: true });
+      await chrome.storage.session.set({
+        scanSession: {
+          tabId:   tab2.id,
+          tabUrl:  tab2.url,
+          results: currentResults,
+          source:  currentSource,
+          isPDF:   data.type === 'pdf',
+        }
+      });
+    } catch (_) { /* session storage unavailable on older Chrome */ }
   } catch (err) {
     setStatus('⚠ ' + err.message);
   } finally {
@@ -441,7 +456,7 @@ function renderWordList(results) {
         </div>
         <div class="card-def">${item.definition}</div>
         ${contextHTML}
-        <div class="card-source">📍 ${item.source}</div>
+        <div class="card-source">${item.source}</div>
       </div>
     `;
 
@@ -459,16 +474,14 @@ function renderWordList(results) {
 
 function setScanningState(scanning) {
   scanBtn.disabled = scanning;
-  scanIcon.textContent = scanning ? '⏳' : '⚡';
   scanText.textContent = scanning ? 'Scanning…' : 'Scan Page';
-  scanIcon.classList.toggle('spinning', scanning);
 }
 
 function setStatus(msg) { statusMsg.textContent = msg; }
 function setSource(src, isPDF = false) {
   sourceBar.classList.remove('hidden');
   sourceLabel.textContent = src;
-  sourceBar.querySelector('.source-icon').textContent = isPDF ? '📄' : '🌐';
+  sourceType.textContent = isPDF ? 'PDF' : 'WEB';
 }
 
 async function updateStats() {
@@ -531,7 +544,7 @@ saveBtn.addEventListener('click', async () => {
   }
 
   await chrome.storage.local.set({ masterWords: master });
-  showToast(`✓ Saved ${toSave.length} word${toSave.length !== 1 ? 's' : ''} to master list`);
+  showToast(`Saved ${toSave.length} word${toSave.length !== 1 ? 's' : ''} to master list`);
   updateStats();
 });
 
@@ -542,145 +555,116 @@ function buildPDFDoc(entries, title) {
   const doc = new jsPDF({ unit: 'pt', format: 'letter' });
   const W   = doc.internal.pageSize.getWidth();
   const H   = doc.internal.pageSize.getHeight();
-  const ML  = 56, MR = 56; // left / right margins
-  const CW  = W - ML - MR; // content width
+  const ML  = 56, MR = 56;
+  const CW  = W - ML - MR;
   let y     = 0;
   let pageNum = 0;
 
-  // ── Helpers ──────────────────────────────────────────────────────────────
-  function rgb(r,g,b) { doc.setTextColor(r,g,b); }
+  function rgb(r,g,b)  { doc.setTextColor(r,g,b); }
   function fill(r,g,b) { doc.setFillColor(r,g,b); }
   function draw(r,g,b) { doc.setDrawColor(r,g,b); }
 
   function drawPageChrome() {
     pageNum++;
-    // Top rule
-    draw(100,110,220); doc.setLineWidth(1.5);
-    doc.line(ML, 36, W - MR, 36);
+    // Light header rule
+    draw(200, 202, 228); doc.setLineWidth(0.4);
+    doc.line(ML, 32, W - MR, 32);
     // Header text
-    doc.setFontSize(7.5).setFont(undefined,'normal');
-    rgb(120,130,180);
-    doc.text('VOCAB SCANNER', ML, 28);
-    doc.text(title.toUpperCase(), W/2, 28, { align:'center' });
-    doc.text(`${pageNum}`, W - MR, 28, { align:'right' });
-    // Bottom rule
-    draw(220,222,240); doc.setLineWidth(0.4);
-    doc.line(ML, H - 30, W - MR, H - 30);
-    rgb(160,165,200);
-    doc.setFontSize(7);
-    doc.text('Vocab Scanner  ·  Generated ' + new Date().toLocaleDateString(), W/2, H - 18, { align:'center' });
-    y = 58;
+    doc.setFontSize(7.5).setFont(undefined, 'normal');
+    rgb(170, 172, 195);
+    doc.text('VOCAB SCANNER', ML, 24);
+    doc.text(title.toUpperCase(), W / 2, 24, { align: 'center' });
+    doc.text(String(pageNum), W - MR, 24, { align: 'right' });
+    // Footer rule + text
+    draw(215, 217, 235); doc.setLineWidth(0.3);
+    doc.line(ML, H - 26, W - MR, H - 26);
+    rgb(185, 187, 205); doc.setFontSize(7);
+    doc.text('Generated ' + new Date().toLocaleDateString(), W / 2, H - 14, { align: 'center' });
+    y = 54;
   }
 
   function newPage() { doc.addPage(); drawPageChrome(); }
-  function checkY(need) { if (y + need > H - 44) newPage(); }
+  function checkY(need) { if (y + need > H - 42) newPage(); }
 
-  // ── Cover page ───────────────────────────────────────────────────────────
-  // Dark gradient background
-  fill(10, 12, 28);  doc.rect(0, 0, W, H, 'F');
-  fill(25, 28, 65);  doc.rect(ML - 10, H/2 - 110, CW + 20, 200, 'F');
-  // Accent top bar
-  fill(99, 102, 241); doc.rect(0, 0, W, 6, 'F');
-
-  doc.setFont(undefined, 'bold');
-  doc.setFontSize(36); rgb(129,140,248);
-  doc.text('Vocab Scanner', W/2, H/2 - 52, { align:'center' });
-
-  doc.setFont(undefined, 'normal');
-  doc.setFontSize(16); rgb(192,132,252);
-  doc.text(title, W/2, H/2 - 18, { align:'center'});
-
-  doc.setFontSize(10); rgb(100,116,139);
-  doc.text(`${entries.length} words  ·  Generated ${new Date().toLocaleDateString()}`, W/2, H/2 + 14, { align:'center' });
-
-  // ── Word pages ───────────────────────────────────────────────────────────
-  doc.addPage();
+  // Start on page 1 directly — no cover page
   drawPageChrome();
 
   for (const entry of entries) {
     checkY(90);
 
-    // ── Word heading ──
+    // Word heading
     doc.setFont(undefined, 'bold');
-    doc.setFontSize(15); rgb(75, 85, 200);
+    doc.setFontSize(14); rgb(72, 78, 210);
     doc.text(entry.word, ML, y);
 
-    // POS badge — small pill to the right of the word
+    // POS badge inline
     if (entry.pos) {
       const wx = doc.getTextWidth(entry.word);
       const posTxt = entry.pos.toUpperCase();
-      doc.setFontSize(7.5).setFont(undefined,'normal');
+      doc.setFontSize(7.5).setFont(undefined, 'normal');
       const pw = doc.getTextWidth(posTxt) + 8;
-      fill(230, 225, 255); doc.roundedRect(ML + wx + 8, y - 10, pw, 13, 2, 2, 'F');
-      rgb(100, 60, 200);
+      fill(232, 230, 250); doc.roundedRect(ML + wx + 8, y - 10, pw, 12, 2, 2, 'F');
+      rgb(110, 80, 195);
       doc.text(posTxt, ML + wx + 12, y - 1);
     }
-    y += 5;
+    y += 4;
 
     // Phonetic — strip non-ASCII (jsPDF built-in fonts don't support IPA)
     if (entry.phonetic) {
       const safe = entry.phonetic.replace(/[^\x20-\x7E]/g, '').trim();
       if (safe.length > 1) {
-        doc.setFontSize(9).setFont(undefined,'italic'); rgb(140,140,180);
+        doc.setFontSize(9).setFont(undefined, 'italic'); rgb(155, 158, 185);
         doc.text(safe, ML, y + 4);
         y += 14;
       }
     }
 
-    // Divider under heading
-    draw(190,195,240); doc.setLineWidth(0.6);
+    // Thin rule under word (light, not prominent)
+    draw(218, 220, 240); doc.setLineWidth(0.35);
     doc.line(ML, y + 4, W - MR, y + 4);
     y += 14;
 
-    // ── Definition ──
-    doc.setFont(undefined,'normal');
-    doc.setFontSize(10); rgb(35, 40, 70);
+    // Definition
+    doc.setFont(undefined, 'normal');
+    doc.setFontSize(10); rgb(40, 44, 68);
     const defLines = doc.splitTextToSize(entry.definition, CW);
-    checkY(defLines.length * 13 + 6);
+    checkY(defLines.length * 14 + 6);
     doc.text(defLines, ML, y);
-    y += defLines.length * 13 + 8;
+    y += defLines.length * 14 + 14; // gap before context boxes
 
-    // ── Context sentences ──
+    // Context sentences
     const occs = entry.occurrences
       || (entry.contexts || []).map(s => ({ sentence: s, source: entry.source || '' }));
 
     for (const occ of occs.slice(0, 5)) {
-      const clean = occ.sentence.replace(/"/g, '\u201c').replace(/'/g, '\u2019');
-      const ctxLines = doc.splitTextToSize(`\u201c${clean}\u201d`, CW - 18);
-      const bH = ctxLines.length * 13 + 14;
+      const txt = '\u201c' + occ.sentence.replace(/"/g, ' ') + '\u201d';
+      // CW - 28 = 14px left padding + 14px right breathing room; prevents overflow
+      const ctxLines = doc.splitTextToSize(txt, CW - 28);
+      const bH = ctxLines.length * 14 + 10; // 14pt line height, 5pt top + 5pt bottom padding
       checkY(bH + 18);
 
-      // Box background + left accent stripe
-      fill(245, 246, 255); draw(200,205,240); doc.setLineWidth(0.4);
-      doc.roundedRect(ML, y, CW, bH, 3, 3, 'FD');
-      fill(99,102,241); doc.rect(ML, y, 3, bH, 'F');
+      fill(246, 247, 254); draw(208, 211, 240); doc.setLineWidth(0.3);
+      doc.roundedRect(ML, y, CW, bH, 2, 2, 'FD');
+      fill(91, 95, 220); doc.rect(ML, y, 3, bH, 'F');
 
-      // Quote text
-      doc.setFontSize(9).setFont(undefined,'italic'); rgb(50,60,110);
-      doc.text(ctxLines, ML + 10, y + 10);
-      y += bH + 3;
+      doc.setFontSize(9).setFont(undefined, 'italic'); rgb(55, 62, 108);
+      doc.text(ctxLines, ML + 12, y + 8);
+      y += bH + 5;
 
-      // Source attribution
       if (occ.source) {
-        doc.setFontSize(7.5).setFont(undefined,'normal'); rgb(150,155,185);
-        const src = occ.source.length > 70 ? occ.source.slice(0,67) + '\u2026' : occ.source;
-        doc.text('\u2014 ' + src, ML + 10, y + 2);
-        y += 13;
+        doc.setFontSize(7.5).setFont(undefined, 'normal'); rgb(160, 163, 188);
+        const src = occ.source.length > 70 ? occ.source.slice(0, 67) + '\u2026' : occ.source;
+        doc.text('\u2014 ' + src, ML + 12, y + 2);
+        y += 15;
       }
-      y += 2;
+      y += 6; // gap between context boxes
     }
 
-    y += 12;
-    // Entry separator
-    if (y < H - 60) {
-      draw(230,232,245); doc.setLineWidth(0.3);
-      doc.line(ML + 30, y - 4, W - MR - 30, y - 4);
-    }
+    y += 28; // whitespace between entries
   }
 
   return doc;
 }
-
 
 
 // Per-scan PDF
@@ -692,18 +676,37 @@ scanPdfBtn.addEventListener('click', () => {
   doc.save(`vocab-scan-${date}.pdf`);
 });
 
+// Clear master list
+clearBtn.addEventListener('click', async () => {
+  const stored = await chrome.storage.local.get('masterWords');
+  const master = stored.masterWords || {};
+  const count = Object.keys(master).length;
+
+  if (count === 0) { showToast('Master list is already empty.'); return; }
+
+  // Two-step confirmation — make the irreversibility explicit
+  const confirmed = window.confirm(
+    `Clear master list?\n\nThis will permanently delete all ${count} saved word${count !== 1 ? 's' : ''}.\nThis action cannot be undone.\n\nClick OK to confirm.`
+  );
+  if (!confirmed) return;
+
+  await chrome.storage.local.remove('masterWords');
+  showToast(`Deleted ${count} word${count !== 1 ? 's' : ''} from master list.`);
+  updateStats();
+});
+
 // Master PDF
 masterBtn.addEventListener('click', async () => {
   const stored = await chrome.storage.local.get('masterWords');
   const master = stored.masterWords || {};
   const entries = Object.values(master).sort((a, b) => a.word.localeCompare(b.word));
   if (!entries.length) { showToast('Master list is empty — save some words first!'); return; }
-  masterBtn.textContent = '⏳ Generating…';
+  masterBtn.textContent = 'Generating…';
   masterBtn.disabled = true;
   setTimeout(() => {
     const doc = buildPDFDoc(entries, 'Master Vocabulary List');
     doc.save('vocab-master.pdf');
-    masterBtn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 16l4-4m0 0l-4-4m4 4H4M20 12a8 8 0 11-16 0 8 8 0 0116 0z"/></svg> Master PDF`;
+    masterBtn.textContent = 'Master PDF';
     masterBtn.disabled = false;
   }, 50);
 });
@@ -712,3 +715,19 @@ masterBtn.addEventListener('click', async () => {
 
 scanBtn.addEventListener('click', scanPage);
 updateStats();
+
+// Restore previous scan session if popup reopened on the same tab
+(async () => {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const stored = await chrome.storage.session.get('scanSession');
+    const s = stored.scanSession;
+    if (s && s.tabId === tab.id && s.tabUrl === tab.url && s.results?.length) {
+      currentResults = s.results;
+      currentSource  = s.source;
+      setSource(currentSource, s.isPDF);
+      renderWordList(currentResults);
+      updateStats();
+    }
+  } catch (_) { /* ignore — storage.session unavailable or tab query failed */ }
+})();

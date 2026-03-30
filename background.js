@@ -18,3 +18,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true; // Keep message channel open for async response
   }
 });
+
+// Clear the scan session when the scanned tab navigates or reloads,
+// so the popup doesn't restore stale results on a new page.
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.status !== 'loading') return;
+  chrome.storage.session.get('scanSession').then(stored => {
+    if (stored.scanSession?.tabId === tabId) {
+      chrome.storage.session.remove('scanSession');
+    }
+  }).catch(() => {});
+});
+

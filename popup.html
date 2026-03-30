@@ -9,31 +9,27 @@
   <link rel="stylesheet" href="popup.css" />
 </head>
 <body>
+
   <!-- Header -->
   <header class="header">
-    <div class="logo">
-      <span class="logo-icon">📚</span>
-      <div>
-        <div class="logo-title">Vocab Scanner</div>
-        <div class="logo-sub">SAT · GRE · Grade 9+</div>
-      </div>
+    <div>
+      <div class="app-name">Vocab Scanner</div>
+      <div class="app-sub">SAT · GRE · Academic</div>
     </div>
-    <button id="masterBtn" class="btn-ghost" title="Export Master PDF">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 16l4-4m0 0l-4-4m4 4H4M20 12a8 8 0 11-16 0 8 8 0 0116 0z"/></svg>
-      Master PDF
-    </button>
+    <div class="header-actions">
+      <button id="masterBtn" class="btn-outline">Master PDF</button>
+      <button id="clearBtn" class="btn-danger-outline">Clear List</button>
+    </div>
   </header>
 
   <!-- Source bar -->
   <div id="sourceBar" class="source-bar hidden">
-    <span class="source-icon">🌐</span>
-    <span id="sourceLabel" class="source-label">—</span>
+    <span id="sourceType" class="source-type">WEB</span><span id="sourceLabel">—</span>
   </div>
 
   <!-- Scan section -->
   <div class="scan-section">
     <button id="scanBtn" class="btn-scan">
-      <span id="scanIcon" class="scan-icon">⚡</span>
       <span id="scanText">Scan Page</span>
     </button>
     <div id="statusMsg" class="status-msg"></div>
@@ -41,10 +37,10 @@
 
   <!-- Stats bar -->
   <div id="statsBar" class="stats-bar hidden">
-    <span id="wordCount" class="stat">0 words found</span>
+    <span id="wordCount" class="stat">0 words</span>
     <span class="stat-sep">·</span>
-    <span id="savedCount" class="stat">0 saved total</span>
-    <button id="selectAll" class="btn-tiny">Select All</button>
+    <span id="savedCount" class="stat">0 saved</span>
+    <button id="selectAll" class="btn-tiny" style="margin-left:auto">Select All</button>
     <button id="deselectAll" class="btn-tiny">None</button>
   </div>
 
@@ -53,22 +49,16 @@
 
   <!-- Empty state -->
   <div id="emptyState" class="empty-state">
-    <div class="empty-icon">🔍</div>
-    <div class="empty-title">Ready to scan</div>
-    <div class="empty-sub">Click "Scan Page" to detect hard vocabulary on the current page or PDF.</div>
+    <div class="empty-title">No words yet</div>
+    <div class="empty-sub">Click Scan Page to detect advanced vocabulary on the current page or PDF.</div>
   </div>
 
-  <!-- Footer actions -->
+  <!-- Footer -->
   <div id="footer" class="footer hidden">
-    <button id="saveBtn" class="btn-primary">
-      💾 Save Selected
-    </button>
-    <button id="scanPdfBtn" class="btn-secondary">
-      ⬇ Download Scan PDF
-    </button>
+    <button id="saveBtn" class="btn-primary">Save Selected</button>
+    <button id="scanPdfBtn" class="btn-secondary">Download PDF</button>
   </div>
 
-  <!-- Scripts — order matters -->
   <script src="libs/commonwords.js"></script>
   <script src="libs/pdf.min.js"></script>
   <script src="libs/jspdf.umd.min.js"></script>
