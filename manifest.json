@@ -3,7 +3,7 @@
   "name": "Vocab Scanner",
   "version": "1.0.0",
   "description": "Scan web pages and PDFs for hard vocabulary words. Build your master vocabulary PDF over time.",
-  "permissions": ["storage", "activeTab", "scripting"],
+  "permissions": ["storage", "activeTab", "scripting", "tabs"],
   "host_permissions": ["<all_urls>"],
   "action": {
     "default_popup": "popup.html",

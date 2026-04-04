@@ -1,16 +1,11 @@
 // popup.js — Vocab Scanner Main Logic
 'use strict';
 
-// ── Constants ──────────────────────────────────────────────────────────────
-const DICT_API = 'https://api.dictionaryapi.dev/api/v2/entries/en/';
-const MAX_RESULTS    = 100; // Max words shown per scan (after definition filter)
-const MAX_CANDIDATES = 200; // Candidate pool before API validation
-const API_CONCURRENCY = 8;  // Parallel dictionary lookups
-const MIN_WORD_LEN = 7;     // Minimum chars to be considered "hard"
-
 // ── State ──────────────────────────────────────────────────────────────────
-let currentResults = []; // [{word, definition, pos, phonetic, contexts, selected}]
-let currentSource = '';
+// Word detection, API calls, and deduplication all run in background.js.
+// Popup only handles text extraction (PDF.js) and UI rendering.
+let currentResults = [];
+let currentSource  = '';
 
 // ── DOM refs ───────────────────────────────────────────────────────────────
 const scanBtn     = document.getElementById('scanBtn');
@@ -32,279 +27,8 @@ const savedCountEl= document.getElementById('savedCount');
 const selectAll   = document.getElementById('selectAll');
 const deselectAll = document.getElementById('deselectAll');
 
-// ── Word Detection (Inverse / Exclusion Approach) ────────────────────────────
-// Strategy: flag any word that is long enough AND not in the 20k common-words
-// exclusion list. This naturally captures tens of thousands of advanced words
-// without needing to enumerate them.
 
-// Words that look like proper nouns, codes, or noise — quick reject patterns
-const NOISE_RE = /[^a-z]/;          // any non-alpha char after lowercasing
-const ALWAYS_SKIP = new Set([
-  // Short function words that survive the length filter
-  'ourselves','themselves','something','everything','anything','nothing',
-  'someone','everyone','anyone','somewhere','everywhere','anywhere',
-  'another','however','although','because','through','without',
-  'between','different','together','children','national','government',
-  'possible','probably','actually','important','including','following',
-  'american','english','british','chapter','section','january',
-  'february','october','november','december','saturday','thursday',
-  'following','business','thousand','remember','political','economic',
-  'education','standard','industry','language','continue','everyone',
-  'personal','problem','example','usually','company','country',
-  'question','program','history','million','whether','nothing',
-  'already','general','quickly','himself','members','several',
-  'percent','thought','system','university','president',
-  'department','information','available','technology','development',
-  'community','individual','sometimes','according','throughout',
-  'environment','understand','companies','together','products',
-  'services','research','students','children','working','looking',
-  'building','becoming','creating','himself','herself','yourself',
-]);
 
-function isHardWord(raw) {
-  const w = raw.toLowerCase();
-  // Must be long enough
-  if (w.length < MIN_WORD_LEN) return false;
-  // Must be pure alpha
-  if (NOISE_RE.test(w)) return false;
-  // Skip words in our "always skip" override set
-  if (ALWAYS_SKIP.has(w)) return false;
-  // The core rule: NOT in the 20k most common English words
-  if (window.COMMON_WORDS.has(w)) return false;
-  // Also check common inflections: strip -s, -ed, -ing, -ly, -er
-  const stems = [
-    w.endsWith('ing') && w.length > 10 ? w.slice(0, -3) : null,
-    w.endsWith('ing') && w.length > 10 ? w.slice(0, -3) + 'e' : null,
-    w.endsWith('tion') ? w.slice(0, -4) + 'te' : null,
-    w.endsWith('ed') ? w.slice(0, -2) : null,
-    w.endsWith('ed') ? w.slice(0, -1) : null,
-    w.endsWith('ly') ? w.slice(0, -2) : null,
-    w.endsWith('er') ? w.slice(0, -2) : null,
-    w.endsWith('s')  ? w.slice(0, -1) : null,
-  ];
-  for (const stem of stems) {
-    if (stem && stem.length >= MIN_WORD_LEN && window.COMMON_WORDS.has(stem)) return false;
-  }
-  return true;
-}
-
-// Return the "canonical" form of a word for deduplication
-// (we keep the shortest form seen so the display word looks clean)
-function canonicalize(raw) {
-  return raw.toLowerCase();
-}
-
-// ── Proper Noun Detection (Capitalization Ratio) ───────────────────────────
-// For every word we walk each sentence. If the word appears at a
-// NON-sentence-start position and is capitalized, that's evidence it is a
-// proper noun. We tally capMid vs. lower occurrences per word.
-// Threshold: >65% capitalized mid-sentence → likely proper noun.
-
-function buildCapitalizationProfile(text) {
-  const profile = new Map(); // lowercase → { capMid: n, lower: n }
-
-  // Split into rough sentences on . ! ? newline
-  const sentences = text.split(/(?:[.!?\n]+)\s*/);
-
-  for (const sentence of sentences) {
-    const trimmed = sentence.trim();
-    if (!trimmed) continue;
-    const words = trimmed.match(/\b[A-Za-z]+\b/g);
-    if (!words) continue;
-
-    for (let i = 0; i < words.length; i++) {
-      const word = words[i];
-      const lw = word.toLowerCase();
-      if (!profile.has(lw)) profile.set(lw, { capMid: 0, lower: 0 });
-      const entry = profile.get(lw);
-      const isCap = /^[A-Z]/.test(word);
-      const isSentenceStart = i === 0;
-
-      if (!isSentenceStart && isCap) {
-        entry.capMid++;
-      } else {
-        entry.lower++;
-      }
-    }
-  }
-  return profile;
-}
-
-function isProperNoun(lowerWord, profile) {
-  const entry = profile.get(lowerWord);
-  if (!entry) return false;
-  // Strict rule: if the word is EVER capitalized mid-sentence, it's a proper noun.
-  // Real vocabulary words are virtually never capitalized mid-sentence.
-  return entry.capMid > 0;
-}
-
-// Garbage patterns that sneak in from page scraping (social links, video timecodes, etc.)
-const GARBAGE_RE = /https?:\/\/|www\.|facebook|linkedin|twitter|reddit|instagram|youtube|\d{2}:\d{2}|CopiedAuto|mailto:|cookie|subscribe|newsletter/i;
-
-function extractSentences(text) {
-  return text
-    .replace(/([.!?])\s+/g, '$1\n')
-    .split('\n')
-    .map(s => s.trim())
-    .filter(s => {
-      if (s.length < 25 || s.length > 350) return false;
-      if (GARBAGE_RE.test(s)) return false;
-      // Reject lines where less than 65% of chars are letters/spaces (URL noise, codes)
-      const letters = (s.match(/[a-zA-Z ]/g) || []).length;
-      if (letters / s.length < 0.65) return false;
-      return true;
-    });
-}
-
-function findContexts(baseWord, sentences, maxCtx = 3) {
-  const re = new RegExp(`\\b${baseWord}\\w{0,10}\\b`, 'i');
-  return sentences.filter(s => re.test(s)).slice(0, maxCtx);
-}
-
-// ── Stem-based Deduplication ──────────────────────────────────────────────────
-// Groups inflected/plural variants under one canonical base form.
-// "airstrikes" + "airstrike" → canonical "airstrike", merged contexts.
-// "accorded" + "accords" + "according" → canonical "accord", merged contexts.
-
-function getStem(word) {
-  const w = word.toLowerCase();
-  // Rules ordered longest-suffix-first to avoid partial matches.
-  const rules = [
-    [/izations?$/,  ''], [/isations?$/, ''],
-    [/ations$/,  'ate'], [/ation$/,   'ate'],
-    [/nesses$/,    ''], [/ness$/,       ''],
-    [/ments$/,     ''], [/ment$/,       ''],
-    [/ances$/,     ''], [/ance$/,       ''],
-    [/ences$/,     ''], [/ence$/,       ''],
-    [/ities$/,     ''], [/ity$/,        ''],
-    [/ives$/,      ''], [/ive$/,        ''],
-    [/ables$/,     ''], [/able$/,       ''],
-    [/ibles$/,     ''], [/ible$/,       ''],
-    [/izing$/,  'ize'], [/ising$/,   'ise'],
-    [/ized$/,   'ize'], [/ised$/,    'ise'],
-    [/izes$/,   'ize'], [/ises$/,    'ise'],
-    [/ize$/,       ''], [/ise$/,        ''],
-    [/ings$/,      ''], [/ing$/,        ''],
-    [/ated$/,  'ate'], [/ates$/,    'ate'], [/ating$/, 'ate'],
-    [/ously$/,     ''], [/ous$/,        ''],
-    [/fully$/,     ''], [/ful$/,        ''],
-    [/lessly$/,    ''], [/less$/,       ''],
-    [/ally$/,      ''],
-    [/ers$/,       ''], [/er$/,         ''],
-    [/est$/,       ''], [/edly$/,       ''],
-    [/ed$/,        ''], [/ly$/,         ''],
-    [/ies$/,       'y'], [/es$/,        ''],
-    [/s$/,         ''],
-  ];
-  for (const [re, repl] of rules) {
-    const m = w.match(re);
-    if (m && w.length - m[0].length >= 4) {
-      return w.slice(0, w.length - m[0].length) + repl;
-    }
-  }
-  return w;
-}
-
-// After API validation, group words by stem and merge contexts.
-// Returns a flat array of deduplicated entry objects.
-function deduplicateByTense(validWords, defs, wordMap) {
-  const stemGroups = new Map(); // stem → [words]
-  for (const word of validWords) {
-    const stem = getStem(word);
-    if (!stemGroups.has(stem)) stemGroups.set(stem, []);
-    stemGroups.get(stem).push(word);
-  }
-
-  const entries = [];
-  for (const group of stemGroups.values()) {
-    // Pick canonical = shortest word in the group that has a definition
-    group.sort((a, b) => a.length - b.length);
-    const canonical = group.find(w => defs[w]?.definition) || group[0];
-
-    // Merge all context sentences from all variants, deduplicating
-    const ctxSeen = new Set();
-    const allContexts = [];
-    for (const word of group) {
-      for (const ctx of (wordMap.get(word) || [])) {
-        if (!ctxSeen.has(ctx)) { ctxSeen.add(ctx); allContexts.push(ctx); }
-      }
-    }
-
-    entries.push({
-      word:       canonical,
-      definition: defs[canonical].definition,
-      pos:        defs[canonical].pos || '',
-      phonetic:   defs[canonical].phonetic || '',
-      contexts:   allContexts.slice(0, 5), // up to 5 merged context sentences
-    });
-  }
-
-  // Re-sort alphabetically after dedup
-  return entries.sort((a, b) => a.word.localeCompare(b.word));
-}
-
-function detectHardWords(text) {
-  const sentences = extractSentences(text);
-
-  // Build capitalization profile from the RAW text (preserves case)
-  const capProfile = buildCapitalizationProfile(text);
-
-  // Track frequency of each hard, non-proper-noun word
-  const freq = new Map();
-  const tokens = text.match(/\b[a-zA-Z]+\b/g) || [];
-
-  for (const token of tokens) {
-    if (!isHardWord(token)) continue;
-    const key = canonicalize(token);
-    // Strict: any mid-sentence capitalization → proper noun → skip
-    if (isProperNoun(key, capProfile)) continue;
-    freq.set(key, (freq.get(key) || 0) + 1);
-  }
-
-  // Sort: most-frequent hard words first, then alphabetically.
-  // Use MAX_CANDIDATES here — we'll trim to MAX_RESULTS after API filtering.
-  const sorted = [...freq.entries()]
-    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .slice(0, MAX_CANDIDATES)
-    .map(([word]) => word);
-
-  const seen = new Map();
-  for (const word of sorted) {
-    const contexts = findContexts(word, sentences);
-    seen.set(word, contexts);
-  }
-
-  return seen; // Map<word, contexts[]>
-}
-
-// ── Dictionary API ─────────────────────────────────────────────────────────
-
-async function fetchDefinition(word) {
-  try {
-    const res = await fetch(DICT_API + encodeURIComponent(word));
-    if (!res.ok) return null;
-    const data = await res.json();
-    const entry = data[0];
-    const meaning = entry?.meanings?.[0];
-    return {
-      definition: meaning?.definitions?.[0]?.definition || '',
-      pos: meaning?.partOfSpeech || '',
-      phonetic: entry?.phonetic || '',
-    };
-  } catch { return null; }
-}
-
-async function batchFetchDefinitions(words) {
-  const results = {};
-  // Process in chunks of API_CONCURRENCY
-  for (let i = 0; i < words.length; i += API_CONCURRENCY) {
-    const chunk = words.slice(i, i + API_CONCURRENCY);
-    const defs = await Promise.all(chunk.map(w => fetchDefinition(w)));
-    chunk.forEach((w, j) => { results[w] = defs[j]; });
-    setStatus(`Fetching definitions… (${Math.min(i + API_CONCURRENCY, words.length)}/${words.length})`);
-  }
-  return results;
-}
 
 // ── PDF Parsing ────────────────────────────────────────────────────────────
 
@@ -335,6 +59,9 @@ async function extractPDFText(url) {
 }
 
 // ── Scanning ───────────────────────────────────────────────────────────────
+// Text extraction stays in popup (needs pdf.js running here).
+// Everything after that is handed to background.js, which runs independently
+// so closing the popup mid-scan does NOT stop it.
 
 async function scanPage() {
   setScanningState(true);
@@ -366,54 +93,42 @@ async function scanPage() {
 
     if (!text || text.length < 50) throw new Error('Not enough text found on this page.');
 
-    setStatus(`Processing ${text.split(/\s+/).length.toLocaleString()} words…`);
+    // Mark session as scanning so we can restore progress if popup is reopened
+    await chrome.storage.session.set({
+      scanSession: {
+        status: 'scanning',
+        progress: 'Starting analysis…',
+        tabId: tab.id,
+        tabUrl: tab.url,
+        source: currentSource,
+        isPDF: data.type === 'pdf',
+      }
+    }).catch(() => {});
 
-    const wordMap = detectHardWords(text);
-    if (wordMap.size === 0) throw new Error('No advanced vocabulary detected.');
+    setStatus('Scanning\u2026 (safe to close this popup)');
 
-    setStatus(`Found ${wordMap.size} candidates. Validating & deduplicating…`);
-    const words = [...wordMap.keys()].sort();
-    const defs = await batchFetchDefinitions(words);
+    // Hand off to background — it runs independently of popup lifecycle.
+    // Results come back via chrome.storage.onChanged (listener below).
+    // The no-op callback is REQUIRED: without it Chrome never opens the response
+    // channel, so the background's `return true` + sendResponse trick cannot keep
+    // the service worker alive and the scan dies immediately.
+    chrome.runtime.sendMessage({
+      action: 'processText',
+      text,
+      source: currentSource,
+      tabId:  tab.id,
+      tabUrl: tab.url,
+      isPDF:  data.type === 'pdf',
+    }, () => { void chrome.runtime.lastError; });
+    // Do NOT await — background fires-and-forgets.
+    // setScanningState(false) is called by onChanged when background finishes.
 
-    // Keep only words with a real English dictionary definition
-    const validWords = words.filter(w => defs[w]?.definition);
-    if (validWords.length === 0) throw new Error('No English vocabulary words with definitions found on this page.');
-
-    // Merge tense/plural variants under one canonical base form
-    const dedupedEntries = deduplicateByTense(validWords, defs, wordMap);
-
-    currentResults = dedupedEntries.slice(0, MAX_RESULTS).map(entry => ({
-      word:       entry.word,
-      definition: entry.definition,
-      pos:        entry.pos,
-      phonetic:   entry.phonetic,
-      contexts:   entry.contexts,
-      source:     currentSource,
-      selected:   true,
-    }));
-
-    renderWordList(currentResults);
-    updateStats();
-    setStatus('');
-
-    // Persist results so popup can reopen without re-scanning the same tab
-    try {
-      const [tab2] = await chrome.tabs.query({ active: true, currentWindow: true });
-      await chrome.storage.session.set({
-        scanSession: {
-          tabId:   tab2.id,
-          tabUrl:  tab2.url,
-          results: currentResults,
-          source:  currentSource,
-          isPDF:   data.type === 'pdf',
-        }
-      });
-    } catch (_) { /* session storage unavailable on older Chrome */ }
   } catch (err) {
-    setStatus('⚠ ' + err.message);
-  } finally {
+    setStatus('\u26a0 ' + err.message);
     setScanningState(false);
   }
+  // Note: no finally { setScanningState(false) } here —
+  // that happens via the storage.onChanged listener when background is done.
 }
 
 // ── Render ─────────────────────────────────────────────────────────────────
@@ -718,18 +433,55 @@ masterBtn.addEventListener('click', async () => {
 scanBtn.addEventListener('click', scanPage);
 updateStats();
 
-// Restore previous scan session if popup reopened on the same tab
+// Live listener: background updates storage.session as it scans.
+// This fires whether popup was open the whole time or just reopened.
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'session' || !changes.scanSession) return;
+  const s = changes.scanSession.newValue;
+  if (!s) return;
+
+  if (s.status === 'scanning') {
+    setScanningState(true);
+    setStatus(s.progress || 'Scanning\u2026');
+    if (s.source && !currentSource) {
+      currentSource = s.source;
+      setSource(currentSource, s.isPDF);
+    }
+  } else if (s.status === 'done') {
+    currentResults = s.results || [];
+    currentSource  = s.source || '';
+    if (currentSource) setSource(currentSource, s.isPDF);
+    renderWordList(currentResults);
+    updateStats();
+    setStatus('');
+    setScanningState(false);
+  } else if (s.status === 'error') {
+    setStatus('\u26a0 ' + (s.error || 'Scan failed'));
+    setScanningState(false);
+  }
+});
+
+// On open: restore completed result OR re-attach to an in-progress scan.
 (async () => {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     const stored = await chrome.storage.session.get('scanSession');
     const s = stored.scanSession;
-    if (s && s.tabId === tab.id && s.tabUrl === tab.url && s.results?.length) {
+    if (!s || s.tabId !== tab.id) return;
+
+    if (s.status === 'done' && s.results?.length) {
       currentResults = s.results;
-      currentSource  = s.source;
+      currentSource  = s.source || '';
       setSource(currentSource, s.isPDF);
       renderWordList(currentResults);
       updateStats();
+    } else if (s.status === 'scanning') {
+      // Background is still running — show current progress and wait
+      currentSource = s.source || '';
+      if (currentSource) setSource(currentSource, s.isPDF);
+      setScanningState(true);
+      setStatus(s.progress || 'Scanning\u2026');
+      // onChanged will fire when background completes
     }
-  } catch (_) { /* ignore — storage.session unavailable or tab query failed */ }
+  } catch (_) { /* storage.session unavailable or tab query failed */ }
 })();

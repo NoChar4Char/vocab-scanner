@@ -1,7 +1,7 @@
 // libs/commonwords.js
 // Top 20,000 most common English words (Google Books frequency data)
 // Any word NOT in this set AND >= 7 chars is treated as advanced vocabulary
-window.COMMON_WORDS = new Set([
+self.COMMON_WORDS = new Set([
   'the','of','and','to','a','in','for','is',
   'on','that','by','this','with','i','you','it',
   'not','or','be','are','from','at','as','your',
