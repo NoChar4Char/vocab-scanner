@@ -159,31 +159,57 @@ async function fetchDefinition(word, retries = 4) {
 }
 
 async function batchFetchDefinitions(words, onProgress) {
+  const keys = words.map(w => `dict_${w}`);
+  const cachedData = await chrome.storage.local.get(keys);
+  
   const results = {};
-  let pendingWords = [...words];
+  const missingWords = [];
+  
+  // 1. Separate cached vs missing words
+  for (const w of words) {
+    const key = `dict_${w}`;
+    if (cachedData[key]) {
+      results[w] = cachedData[key].notFound ? null : cachedData[key];
+    } else {
+      missingWords.push(w);
+    }
+  }
+
+  let pendingWords = [...missingWords];
   let pass = 1;
   const maxPasses = 3;
 
+  // 2. Fetch missing words from API
   while (pendingWords.length > 0 && pass <= maxPasses) {
     const nextPending = [];
-    const totalWords = words.length;
+    const totalWords = missingWords.length;
 
     for (let i = 0; i < pendingWords.length; i += API_CONCURRENCY) {
       const chunk = pendingWords.slice(i, i + API_CONCURRENCY);
       const defs  = await Promise.all(chunk.map(w => fetchDefinition(w)));
       
+      const toCache = {};
+
       chunk.forEach((w, j) => { 
         if (defs[j] === undefined) {
           nextPending.push(w);
         } else {
           results[w] = defs[j]; 
+          toCache[`dict_${w}`] = defs[j] || { notFound: true, timestamp: Date.now() };
         }
       });
+
+      // Save chunk to local storage immediately
+      if (Object.keys(toCache).length > 0) {
+        await chrome.storage.local.set(toCache);
+      }
 
       if (onProgress) {
         const doneCount = totalWords - pendingWords.length + i + chunk.length;
         const passText = pass > 1 ? ` (retry pass ${pass})` : '';
-        onProgress(`Fetching definitions${passText}… (${Math.min(doneCount, totalWords)}/${totalWords})`);
+        const totalKnown = words.length - missingWords.length;
+        // Make it clear we're only fetching new words
+        onProgress(`Fetching new words${passText}… (${Math.min(doneCount, totalWords)}/${totalWords}) — ${totalKnown} loaded from cache`);
       }
 
       if (i + API_CONCURRENCY < pendingWords.length) {
